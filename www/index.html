@@ -62,8 +62,14 @@
                 <input type="checkbox" id="bg-toggle" />
                 <label for="bg-toggle">Run in Background</label>
             </div>
-            <p class="hint" id="bg-hint">Keeps connection active when app is minimized.</p>
+            <p class="hint" id="bg-hint">Keeps streaming active when app is minimized.</p>
             <button id="battery-opt-btn" class="text-link hidden">Disable Battery Optimization</button>
+
+            <div class="input-group">
+                <label for="buffer-input">Max Background Buffer (KB)</label>
+                <input type="number" id="buffer-input" placeholder="100" min="10" max="10240" step="10" />
+                <p class="hint">Limits memory used to buffer streamed text in background. Default 100KB. Set 0 for unlimited.</p>
+            </div>
 
             <div class="actions">
                 <button id="save-btn" class="primary-btn">Save</button>

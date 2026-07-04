@@ -3,6 +3,7 @@ const AUTH_ENABLED_KEY = 'sillytavern_auth_enabled';
 const AUTH_USER_KEY = 'sillytavern_auth_user';
 const AUTH_PASS_KEY = 'sillytavern_auth_pass';
 const BG_MODE_KEY = 'sillytavern_bg_mode';
+const BUFFER_LIMIT_KEY = 'sillytavern_buffer_limit';
 
 // Elements
 const mainScreen = document.getElementById('main-screen');
@@ -15,6 +16,7 @@ const authUser = document.getElementById('auth-user');
 const authPass = document.getElementById('auth-pass');
 const bgToggle = document.getElementById('bg-toggle');
 const batteryOptBtn = document.getElementById('battery-opt-btn');
+const bufferInput = document.getElementById('buffer-input');
 
 // Buttons
 const connectBtn = document.getElementById('connect-btn');
@@ -28,6 +30,7 @@ function init() {
     // Sync auth settings to native side on startup
     syncAuthToNative();
     syncBackgroundToNative();
+    syncBufferLimitToNative();
 
     if (!storedUrl) {
         // First time open - set default and show settings
@@ -66,7 +69,10 @@ function showSettings() {
     
     bgToggle.checked = localStorage.getItem(BG_MODE_KEY) === 'true';
     checkBatteryOptimization();
-    
+
+    var bufferLimit = localStorage.getItem(BUFFER_LIMIT_KEY);
+    bufferInput.value = bufferLimit !== null ? parseInt(bufferLimit) : 100;
+
     toggleAuthFields();
 }
 
@@ -139,8 +145,14 @@ function saveSettings() {
 
     localStorage.setItem(BG_MODE_KEY, bgToggle.checked);
 
+    var bufferLimit = parseInt(bufferInput.value) || 100;
+    if (bufferLimit < 0) bufferLimit = 0;
+    if (bufferLimit > 10240) bufferLimit = 10240;
+    localStorage.setItem(BUFFER_LIMIT_KEY, bufferLimit);
+
     syncAuthToNative();
     syncBackgroundToNative();
+    syncBufferLimitToNative();
     updateDisplay(url);
     hideSettings();
 }
@@ -149,6 +161,15 @@ function syncBackgroundToNative() {
     const enabled = localStorage.getItem(BG_MODE_KEY) === 'true';
     if (window.BackgroundBridge && window.BackgroundBridge.setBackgroundMode) {
         window.BackgroundBridge.setBackgroundMode(enabled);
+    }
+}
+
+function syncBufferLimitToNative() {
+    var limit = parseInt(localStorage.getItem(BUFFER_LIMIT_KEY)) || 100;
+    if (limit < 0) limit = 0;
+    if (limit > 10240) limit = 10240;
+    if (window.BackgroundBridge && window.BackgroundBridge.setBufferLimit) {
+        window.BackgroundBridge.setBufferLimit(limit);
     }
 }
 

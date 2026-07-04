@@ -1,40 +1,80 @@
 package com.sillytavern.android;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.util.Log;
 import android.webkit.HttpAuthHandler;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebViewClient;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.security.GeneralSecurityException;
 
 public class MainActivity extends BridgeActivity {
+    private static final String TAG = "MainActivity";
     private static final int FILE_CHOOSER_RESULT_CODE = 1;
     private ValueCallback<Uri[]> filePathCallback;
     private static final String PREFS_NAME = "SillyTavernPrefs";
     private static final String KEY_AUTH_USER = "auth_user";
     private static final String KEY_AUTH_PASS = "auth_pass";
     private static final String KEY_BACKGROUND_MODE = "background_mode";
+
+    private StreamingBridge streamingBridge;
+    private boolean isForeground = true;
+    private String injectedScript;
+
+    // Receiver for streaming data from StreamingService
+    private BroadcastReceiver streamReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || streamingBridge == null) return;
+
+            String requestId = intent.getStringExtra("requestId");
+
+            switch (intent.getAction()) {
+                case StreamingService.BROADCAST_STREAM_DATA:
+                    String chunk = intent.getStringExtra("chunk");
+                    boolean isBatch = intent.getBooleanExtra("isBatch", false);
+                    streamingBridge.pushDataToJs(requestId, chunk, isBatch);
+                    break;
+
+                case StreamingService.BROADCAST_STREAM_DONE:
+                    streamingBridge.pushDoneToJs(requestId);
+                    break;
+
+                case StreamingService.BROADCAST_STREAM_ERROR:
+                    String error = intent.getStringExtra("error");
+                    streamingBridge.pushErrorToJs(requestId, error);
+                    break;
+            }
+        }
+    };
 
     private SharedPreferences getSafeSharedPreferences(Context context) {
         try {
@@ -58,6 +98,10 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Load injected JS script from assets
+        injectedScript = loadInjectedScript();
+
         // Enable edge-to-edge display (content behind system bars)
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
 
@@ -66,11 +110,8 @@ public class MainActivity extends BridgeActivity {
             Insets systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
 
-            // Apply the insets as padding to the view.
-            // We use the maximum of system bars and IME for the bottom to ensure
-            // content is pushed up when keyboard appears.
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, Math.max(systemBars.bottom, ime.bottom));
-            
+
             return WindowInsetsCompat.CONSUMED;
         });
 
@@ -78,9 +119,7 @@ public class MainActivity extends BridgeActivity {
         WindowInsetsControllerCompat windowInsetsController =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         if (windowInsetsController != null) {
-            // Set light status bar icons (false means light icons on dark background)
             windowInsetsController.setAppearanceLightStatusBars(false);
-            // Set light navigation bar icons
             windowInsetsController.setAppearanceLightNavigationBars(false);
         }
     }
@@ -89,12 +128,27 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
 
+        isForeground = true;
+        notifyForegroundState(true);
+
         // Get the WebView instance from Capacitor's Bridge
         WebView webView = this.getBridge().getWebView();
 
-        // Add Javascript Interface for Auth & Background
+        // Add JavaScript Interfaces
         webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
         webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
+
+        // Create and add the streaming bridge
+        streamingBridge = new StreamingBridge(this);
+        webView.addJavascriptInterface(streamingBridge, "StreamingBridge");
+
+        // Register broadcast receiver for streaming data
+        LocalBroadcastManager lbm = LocalBroadcastManager.getInstance(this);
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(StreamingService.BROADCAST_STREAM_DATA);
+        filter.addAction(StreamingService.BROADCAST_STREAM_DONE);
+        filter.addAction(StreamingService.BROADCAST_STREAM_ERROR);
+        lbm.registerReceiver(streamReceiver, filter);
 
         // Sync background service state
         syncBackgroundService();
@@ -107,7 +161,7 @@ public class MainActivity extends BridgeActivity {
         webSettings.setUseWideViewPort(true);
         webSettings.setLoadWithOverviewMode(true);
 
-        // Set custom WebViewClient to handle Basic Auth
+        // Set custom WebViewClient to handle Basic Auth and inject streaming bridge
         webView.setWebViewClient(new BridgeWebViewClient(this.getBridge()) {
             @Override
             public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler, String host, String realm) {
@@ -121,18 +175,22 @@ public class MainActivity extends BridgeActivity {
                     super.onReceivedHttpAuthRequest(view, handler, host, realm);
                 }
             }
+
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                // Inject the streaming bridge script before any page JS runs
+                injectBridgeScript(view);
+            }
         });
 
         // Set a custom WebChromeClient to handle permission requests and file selection
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(final PermissionRequest request) {
-                // Automatically grant all permissions (Camera, Microphone, etc.)
-                // In a production app, you might want to check specific permissions
                 request.grant(request.getResources());
             }
 
-            // For Android 5.0+
             @Override
             public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, WebChromeClient.FileChooserParams fileChooserParams) {
                 if (MainActivity.this.filePathCallback != null) {
@@ -152,10 +210,49 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
+    @Override
+    public void onPause() {
+        super.onPause();
+        isForeground = false;
+        notifyForegroundState(false);
+
+        // Unregister broadcast receiver
+        try {
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(streamReceiver);
+        } catch (IllegalArgumentException e) {
+            // Receiver not registered
+        }
+    }
+
+    private void notifyForegroundState(boolean foreground) {
+        Intent intent = new Intent(StreamingService.ACTION_SET_FOREGROUND);
+        intent.putExtra("isForeground", foreground);
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
+    }
+
+    private String loadInjectedScript() {
+        try {
+            InputStream is = getAssets().open("public/st-native-bridge.js");
+            byte[] buffer = new byte[is.available()];
+            is.read(buffer);
+            is.close();
+            return new String(buffer, "UTF-8");
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to load st-native-bridge.js: " + e.getMessage());
+            return "";
+        }
+    }
+
+    private void injectBridgeScript(WebView view) {
+        if (injectedScript != null && !injectedScript.isEmpty()) {
+            view.evaluateJavascript(injectedScript, null);
+        }
+    }
+
     private void syncBackgroundService() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         boolean enabled = prefs.getBoolean(KEY_BACKGROUND_MODE, false);
-        Intent serviceIntent = new Intent(this, KeepAliveService.class);
+        Intent serviceIntent = new Intent(this, StreamingService.class);
         if (enabled) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(serviceIntent);
@@ -197,6 +294,13 @@ public class MainActivity extends BridgeActivity {
                 intent.setData(Uri.parse("package:" + mContext.getPackageName()));
                 mContext.startActivity(intent);
             }
+        }
+
+        @JavascriptInterface
+        public void setBufferLimit(int limitKb) {
+            Intent intent = new Intent(StreamingService.ACTION_SET_BUFFER_LIMIT);
+            intent.putExtra("limitKb", limitKb);
+            LocalBroadcastManager.getInstance(mContext).sendBroadcast(intent);
         }
     }
 
