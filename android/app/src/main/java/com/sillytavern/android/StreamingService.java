@@ -63,6 +63,7 @@ public class StreamingService extends Service {
     public static final String BROADCAST_STREAM_DATA = "com.sillytavern.android.STREAM_DATA";
     public static final String BROADCAST_STREAM_DONE = "com.sillytavern.android.STREAM_DONE";
     public static final String BROADCAST_STREAM_ERROR = "com.sillytavern.android.STREAM_ERROR";
+    public static final String BROADCAST_KEEPALIVE_PING = "com.sillytavern.android.KEEPALIVE_PING";
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -72,6 +73,8 @@ public class StreamingService extends Service {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private LocalBroadcastManager broadcastManager;
     private int maxBufferSize = 100 * 1024; // Default 100KB per stream
+    private Runnable keepaliveRunnable;
+    private static final int KEEPALIVE_INTERVAL_MS = 5000; // Ping every 5 seconds
 
     private static class StreamingRequest {
         Call call;
@@ -151,6 +154,16 @@ public class StreamingService extends Service {
                 .retryOnConnectionFailure(true)
                 .build();
 
+        // Keepalive ping to prevent WebView JS throttling in background
+        keepaliveRunnable = new Runnable() {
+            @Override
+            public void run() {
+                Intent pingIntent = new Intent(BROADCAST_KEEPALIVE_PING);
+                broadcastManager.sendBroadcast(pingIntent);
+                mainHandler.postDelayed(this, KEEPALIVE_INTERVAL_MS);
+            }
+        };
+
         // Register control broadcast receiver
         IntentFilter filter = new IntentFilter();
         filter.addAction(ACTION_START_STREAM);
@@ -184,6 +197,12 @@ public class StreamingService extends Service {
             wifiLock.acquire();
         }
 
+        // Start keepalive pings to prevent WebView JS throttling
+        if (keepaliveRunnable != null) {
+            mainHandler.removeCallbacks(keepaliveRunnable);
+            mainHandler.post(keepaliveRunnable);
+        }
+
         return START_STICKY;
     }
 
@@ -205,6 +224,11 @@ public class StreamingService extends Service {
         }
         if (wifiLock != null && wifiLock.isHeld()) {
             wifiLock.release();
+        }
+
+        // Stop keepalive pings
+        if (keepaliveRunnable != null) {
+            mainHandler.removeCallbacks(keepaliveRunnable);
         }
 
         super.onDestroy();

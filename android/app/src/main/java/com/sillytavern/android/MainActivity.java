@@ -74,6 +74,16 @@ public class MainActivity extends BridgeActivity {
                     String error = intent.getStringExtra("error");
                     streamingBridge.pushErrorToJs(requestId, error);
                     break;
+
+                case StreamingService.BROADCAST_KEEPALIVE_PING:
+                    // Ping WebView to prevent JS engine throttling in background
+                    try {
+                        WebView wv = getBridge().getWebView();
+                        if (wv != null) {
+                            wv.post(() -> wv.evaluateJavascript("void(0)", null));
+                        }
+                    } catch (Exception ignored) {}
+                    break;
             }
         }
     };
@@ -156,6 +166,7 @@ public class MainActivity extends BridgeActivity {
         filter.addAction(StreamingService.BROADCAST_STREAM_DATA);
         filter.addAction(StreamingService.BROADCAST_STREAM_DONE);
         filter.addAction(StreamingService.BROADCAST_STREAM_ERROR);
+        filter.addAction(StreamingService.BROADCAST_KEEPALIVE_PING);
         try {
             lbm.registerReceiver(streamReceiver, filter);
         } catch (IllegalArgumentException e) {
@@ -277,11 +288,14 @@ public class MainActivity extends BridgeActivity {
         isForeground = false;
         notifyForegroundState(false);
 
-        // Unregister broadcast receiver
-        try {
-            LocalBroadcastManager.getInstance(this).unregisterReceiver(streamReceiver);
-        } catch (IllegalArgumentException e) {
-            // Receiver not registered
+        // Keep receiver registered if background mode is enabled (for keepalive pings)
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        if (!prefs.getBoolean(KEY_BACKGROUND_MODE, false)) {
+            try {
+                LocalBroadcastManager.getInstance(this).unregisterReceiver(streamReceiver);
+            } catch (IllegalArgumentException e) {
+                // Receiver not registered
+            }
         }
     }
 
