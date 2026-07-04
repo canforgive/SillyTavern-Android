@@ -26,16 +26,11 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
-import androidx.webkit.WebViewCompat;
-import androidx.webkit.WebViewFeature;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebViewClient;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.security.GeneralSecurityException;
-import java.util.Collections;
 
 public class MainActivity extends BridgeActivity {
     private static final String TAG = "MainActivity";
@@ -46,35 +41,16 @@ public class MainActivity extends BridgeActivity {
     private static final String KEY_AUTH_PASS = "auth_pass";
     private static final String KEY_BACKGROUND_MODE = "background_mode";
 
-    private StreamingBridge streamingBridge;
     private boolean isForeground = true;
-    private String injectedScript;
-    private boolean interfacesAdded = false;
+    private int proxyPort = 0;
 
-    // Receiver for streaming data from StreamingService
-    private BroadcastReceiver streamReceiver = new BroadcastReceiver() {
+    // Receiver for proxy/streaming events from StreamingService
+    private BroadcastReceiver serviceReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (intent == null || streamingBridge == null) return;
-
-            String requestId = intent.getStringExtra("requestId");
+            if (intent == null) return;
 
             switch (intent.getAction()) {
-                case StreamingService.BROADCAST_STREAM_DATA:
-                    String chunk = intent.getStringExtra("chunk");
-                    boolean isBatch = intent.getBooleanExtra("isBatch", false);
-                    streamingBridge.pushDataToJs(requestId, chunk, isBatch);
-                    break;
-
-                case StreamingService.BROADCAST_STREAM_DONE:
-                    streamingBridge.pushDoneToJs(requestId);
-                    break;
-
-                case StreamingService.BROADCAST_STREAM_ERROR:
-                    String error = intent.getStringExtra("error");
-                    streamingBridge.pushErrorToJs(requestId, error);
-                    break;
-
                 case StreamingService.BROADCAST_KEEPALIVE_PING:
                     // Ping WebView to prevent JS engine throttling in background
                     try {
@@ -83,6 +59,12 @@ public class MainActivity extends BridgeActivity {
                             wv.post(() -> wv.evaluateJavascript("void(0)", null));
                         }
                     } catch (Exception ignored) {}
+                    break;
+
+                case StreamingService.BROADCAST_PROXY_READY:
+                    proxyPort = intent.getIntExtra("proxyPort", 0);
+                    String targetUrl = intent.getStringExtra("targetUrl");
+                    Log.d(TAG, "Proxy ready: port=" + proxyPort + " target=" + targetUrl);
                     break;
             }
         }
@@ -93,11 +75,8 @@ public class MainActivity extends BridgeActivity {
             MasterKey masterKey = new MasterKey.Builder(context)
                     .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                     .build();
-
             return EncryptedSharedPreferences.create(
-                    context,
-                    PREFS_NAME,
-                    masterKey,
+                    context, PREFS_NAME, masterKey,
                     EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                     EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             );
@@ -111,24 +90,15 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Load injected JS script from assets
-        injectedScript = loadInjectedScript();
-
-        // Enable edge-to-edge display (content behind system bars)
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-
-        // Apply window insets as padding to avoid obstruction and handle keyboard
         ViewCompat.setOnApplyWindowInsetsListener(getWindow().getDecorView(), (v, windowInsets) -> {
             Insets systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
-
             v.setPadding(systemBars.left, systemBars.top, systemBars.right,
                     Math.max(systemBars.bottom, ime.bottom));
-
             return WindowInsetsCompat.CONSUMED;
         });
 
-        // Configure system bars
         WindowInsetsControllerCompat windowInsetsController =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         if (windowInsetsController != null) {
@@ -144,31 +114,23 @@ public class MainActivity extends BridgeActivity {
         isForeground = true;
         notifyForegroundState(true);
 
-        // Get the WebView instance from Capacitor's Bridge
         WebView webView = this.getBridge().getWebView();
         if (webView == null) {
             Log.e(TAG, "WebView is null!");
             return;
         }
 
-        // Add JavaScript Interfaces (only once to avoid duplicate bindings)
-        if (!interfacesAdded) {
-            webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
-            webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
-            streamingBridge = new StreamingBridge(this);
-            webView.addJavascriptInterface(streamingBridge, "StreamingBridge");
-            interfacesAdded = true;
-        }
+        // Add JavaScript Interfaces
+        webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
+        webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
 
-        // Register broadcast receiver for streaming data
+        // Register broadcast receiver for service events
         LocalBroadcastManager lbm = LocalBroadcastManager.getInstance(this);
         IntentFilter filter = new IntentFilter();
-        filter.addAction(StreamingService.BROADCAST_STREAM_DATA);
-        filter.addAction(StreamingService.BROADCAST_STREAM_DONE);
-        filter.addAction(StreamingService.BROADCAST_STREAM_ERROR);
         filter.addAction(StreamingService.BROADCAST_KEEPALIVE_PING);
+        filter.addAction(StreamingService.BROADCAST_PROXY_READY);
         try {
-            lbm.registerReceiver(streamReceiver, filter);
+            lbm.registerReceiver(serviceReceiver, filter);
         } catch (IllegalArgumentException e) {
             // Already registered
         }
@@ -184,28 +146,6 @@ public class MainActivity extends BridgeActivity {
         webSettings.setUseWideViewPort(true);
         webSettings.setLoadWithOverviewMode(true);
 
-        // Inject streaming bridge script at document start using WebViewCompat
-        // This ensures the script runs BEFORE any page JavaScript, on every page load
-        if (injectedScript != null && !injectedScript.isEmpty()) {
-            try {
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                    WebViewCompat.addDocumentStartJavaScript(
-                            webView,
-                            injectedScript,
-                            Collections.singleton("*")
-                    );
-                    Log.d(TAG, "Document start script added successfully");
-                } else {
-                    Log.w(TAG, "DOCUMENT_START_SCRIPT not supported, falling back to onPageStarted");
-                    // Fallback: inject via onPageStarted
-                    setupPageStartedInjection(webView);
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to add document start script: " + e.getMessage());
-                setupPageStartedInjection(webView);
-            }
-        }
-
         // Set custom WebViewClient to handle Basic Auth
         webView.setWebViewClient(new BridgeWebViewClient(this.getBridge()) {
             @Override
@@ -214,7 +154,6 @@ public class MainActivity extends BridgeActivity {
                 SharedPreferences prefs = getSafeSharedPreferences(MainActivity.this);
                 String user = prefs.getString(KEY_AUTH_USER, null);
                 String pass = prefs.getString(KEY_AUTH_PASS, null);
-
                 if (user != null && !user.isEmpty() && pass != null) {
                     handler.proceed(user, pass);
                 } else {
@@ -237,7 +176,6 @@ public class MainActivity extends BridgeActivity {
                     MainActivity.this.filePathCallback.onReceiveValue(null);
                 }
                 MainActivity.this.filePathCallback = filePathCallback;
-
                 Intent intent = fileChooserParams.createIntent();
                 try {
                     startActivityForResult(intent, FILE_CHOOSER_RESULT_CODE);
@@ -246,38 +184,6 @@ public class MainActivity extends BridgeActivity {
                     return false;
                 }
                 return true;
-            }
-        });
-    }
-
-    /**
-     * Fallback injection via onPageStarted when DOCUMENT_START_SCRIPT is not available.
-     */
-    private void setupPageStartedInjection(WebView webView) {
-        webView.setWebViewClient(new BridgeWebViewClient(this.getBridge()) {
-            @Override
-            public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler,
-                                                   String host, String realm) {
-                SharedPreferences prefs = getSafeSharedPreferences(MainActivity.this);
-                String user = prefs.getString(KEY_AUTH_USER, null);
-                String pass = prefs.getString(KEY_AUTH_PASS, null);
-                if (user != null && !user.isEmpty() && pass != null) {
-                    handler.proceed(user, pass);
-                } else {
-                    super.onReceivedHttpAuthRequest(view, handler, host, realm);
-                }
-            }
-
-            @Override
-            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                super.onPageStarted(view, url, favicon);
-                try {
-                    if (injectedScript != null && !injectedScript.isEmpty()) {
-                        view.evaluateJavascript(injectedScript, null);
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to inject script in onPageStarted: " + e.getMessage());
-                }
             }
         });
     }
@@ -292,7 +198,7 @@ public class MainActivity extends BridgeActivity {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         if (!prefs.getBoolean(KEY_BACKGROUND_MODE, false)) {
             try {
-                LocalBroadcastManager.getInstance(this).unregisterReceiver(streamReceiver);
+                LocalBroadcastManager.getInstance(this).unregisterReceiver(serviceReceiver);
             } catch (IllegalArgumentException e) {
                 // Receiver not registered
             }
@@ -303,25 +209,6 @@ public class MainActivity extends BridgeActivity {
         Intent intent = new Intent(StreamingService.ACTION_SET_FOREGROUND);
         intent.putExtra("isForeground", foreground);
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
-    }
-
-    private String loadInjectedScript() {
-        try {
-            InputStream is = getAssets().open("public/st-native-bridge.js");
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = is.read(buffer)) != -1) {
-                baos.write(buffer, 0, bytesRead);
-            }
-            is.close();
-            String script = baos.toString("UTF-8");
-            Log.d(TAG, "Loaded injected script: " + script.length() + " bytes");
-            return script;
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to load st-native-bridge.js: " + e.getMessage());
-            return "";
-        }
     }
 
     private void syncBackgroundService() {
@@ -338,6 +225,8 @@ public class MainActivity extends BridgeActivity {
             stopService(serviceIntent);
         }
     }
+
+    // ===== JavaScript Bridges =====
 
     public class BackgroundBridge {
         Context mContext;
@@ -369,6 +258,27 @@ public class MainActivity extends BridgeActivity {
                 intent.setData(Uri.parse("package:" + mContext.getPackageName()));
                 mContext.startActivity(intent);
             }
+        }
+
+        /**
+         * Start the local proxy for the given target URL.
+         * Called by JS when background mode is enabled and user wants to connect.
+         * @param targetUrl The real SillyTavern server URL
+         */
+        @JavascriptInterface
+        public void startProxy(String targetUrl) {
+            Log.d(TAG, "startProxy called with: " + targetUrl);
+            Intent intent = new Intent(StreamingService.ACTION_SET_TARGET_URL);
+            intent.putExtra("targetUrl", targetUrl);
+            LocalBroadcastManager.getInstance(mContext).sendBroadcast(intent);
+        }
+
+        /**
+         * Get the current proxy port, or 0 if not running.
+         */
+        @JavascriptInterface
+        public int getProxyPort() {
+            return proxyPort;
         }
 
         @JavascriptInterface
