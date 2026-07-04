@@ -10,6 +10,41 @@ def getPackageJson() {
 
 def packageJson = getPackageJson()
 
+// Task to generate a fixed debug keystore for consistent signing
+task generateDebugKeystore {
+    def keystoreFile = file("debug.keystore")
+
+    doLast {
+        if (keystoreFile.exists()) {
+            return
+        }
+        println "Generating debug keystore: ${keystoreFile.absolutePath}"
+
+        try {
+            exec {
+                commandLine "keytool", "-genkey", "-v",
+                    "-keystore", keystoreFile.absolutePath,
+                    "-alias", "androiddebugkey",
+                    "-keyalg", "RSA", "-keysize", "2048",
+                    "-validity", "36500",
+                    "-storepass", "android",
+                    "-keypass", "android",
+                    "-dname", "CN=Android Debug,O=Android,C=US"
+            }
+        } catch (Exception e) {
+            // If keytool is not available (e.g., no JDK), skip generation
+            // The build will fall back to the default debug keystore
+            println "keytool not available, using default debug keystore: ${e.message}"
+            // Delete the file in case of partial creation
+            if (keystoreFile.exists()) {
+                keystoreFile.delete()
+            }
+        }
+    }
+}
+
+preBuild.dependsOn generateDebugKeystore
+
 android {
     namespace = "com.sillytavern.android"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -17,12 +52,13 @@ android {
         applicationId "com.sillytavern.android"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode System.getenv("GITHUB_RUN_NUMBER") ? System.getenv("GITHUB_RUN_NUMBER").toInteger() : 1
+        // Use GITHUB_RUN_NUMBER in CI (always increments), timestamp locally
+        versionCode System.getenv("GITHUB_RUN_NUMBER") ?
+            System.getenv("GITHUB_RUN_NUMBER").toInteger() :
+            (int)(System.currentTimeMillis() / 1000)
         versionName packageJson.version
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
@@ -42,7 +78,6 @@ android {
     }
     buildTypes {
         debug {
-            // Use fixed debug.keystore if it exists (CI), otherwise use default
             if (signingConfigs.debug.storeFile.exists()) {
                 signingConfig signingConfigs.debug
             }
