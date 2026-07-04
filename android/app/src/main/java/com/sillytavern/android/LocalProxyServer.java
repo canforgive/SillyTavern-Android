@@ -519,13 +519,14 @@ public class LocalProxyServer {
     /**
      * Simple HTTP request info container.
      */
-    private static class HttpRequestInfo extends java.util.HashMap<String, String> {
+    private static class HttpRequestInfo {
         String method;
         String path;
         byte[] body;
+        java.util.Map<String, String> headers = new java.util.HashMap<>();
 
         String getHeader(String name) {
-            return get(name.toLowerCase());
+            return headers.get(name.toLowerCase());
         }
     }
 }
