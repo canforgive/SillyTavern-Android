@@ -27,6 +27,12 @@ android {
         }
     }
     signingConfigs {
+        debug {
+            storeFile file("debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
         release {
             storeFile file(project.findProperty("RELEASE_STORE_FILE") ?: System.getenv("RELEASE_STORE_FILE") ?: "release-key.keystore")
             storePassword project.findProperty("RELEASE_STORE_PASSWORD") ?: System.getenv("RELEASE_STORE_PASSWORD")
@@ -35,6 +41,12 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // Use fixed debug.keystore if it exists (CI), otherwise use default
+            if (signingConfigs.debug.storeFile.exists()) {
+                signingConfig signingConfigs.debug
+            }
+        }
         release {
             signingConfig signingConfigs.release
             minifyEnabled false
