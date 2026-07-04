@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew assembleDebug)",
+      "Bash(gh auth:*)",
+      "Bash(gh repo:*)",
+      "Bash(gh run:*)"
+    ]
+  }
+}

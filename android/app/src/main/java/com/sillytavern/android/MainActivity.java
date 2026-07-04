@@ -16,11 +16,8 @@ import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -29,12 +26,16 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebViewClient;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.GeneralSecurityException;
+import java.util.Collections;
 
 public class MainActivity extends BridgeActivity {
     private static final String TAG = "MainActivity";
@@ -48,6 +49,7 @@ public class MainActivity extends BridgeActivity {
     private StreamingBridge streamingBridge;
     private boolean isForeground = true;
     private String injectedScript;
+    private boolean interfacesAdded = false;
 
     // Receiver for streaming data from StreamingService
     private BroadcastReceiver streamReceiver = new BroadcastReceiver() {
@@ -110,7 +112,8 @@ public class MainActivity extends BridgeActivity {
             Insets systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
 
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, Math.max(systemBars.bottom, ime.bottom));
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right,
+                    Math.max(systemBars.bottom, ime.bottom));
 
             return WindowInsetsCompat.CONSUMED;
         });
@@ -133,14 +136,19 @@ public class MainActivity extends BridgeActivity {
 
         // Get the WebView instance from Capacitor's Bridge
         WebView webView = this.getBridge().getWebView();
+        if (webView == null) {
+            Log.e(TAG, "WebView is null!");
+            return;
+        }
 
-        // Add JavaScript Interfaces
-        webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
-        webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
-
-        // Create and add the streaming bridge
-        streamingBridge = new StreamingBridge(this);
-        webView.addJavascriptInterface(streamingBridge, "StreamingBridge");
+        // Add JavaScript Interfaces (only once to avoid duplicate bindings)
+        if (!interfacesAdded) {
+            webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
+            webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
+            streamingBridge = new StreamingBridge(this);
+            webView.addJavascriptInterface(streamingBridge, "StreamingBridge");
+            interfacesAdded = true;
+        }
 
         // Register broadcast receiver for streaming data
         LocalBroadcastManager lbm = LocalBroadcastManager.getInstance(this);
@@ -148,7 +156,11 @@ public class MainActivity extends BridgeActivity {
         filter.addAction(StreamingService.BROADCAST_STREAM_DATA);
         filter.addAction(StreamingService.BROADCAST_STREAM_DONE);
         filter.addAction(StreamingService.BROADCAST_STREAM_ERROR);
-        lbm.registerReceiver(streamReceiver, filter);
+        try {
+            lbm.registerReceiver(streamReceiver, filter);
+        } catch (IllegalArgumentException e) {
+            // Already registered
+        }
 
         // Sync background service state
         syncBackgroundService();
@@ -161,10 +173,33 @@ public class MainActivity extends BridgeActivity {
         webSettings.setUseWideViewPort(true);
         webSettings.setLoadWithOverviewMode(true);
 
-        // Set custom WebViewClient to handle Basic Auth and inject streaming bridge
+        // Inject streaming bridge script at document start using WebViewCompat
+        // This ensures the script runs BEFORE any page JavaScript, on every page load
+        if (injectedScript != null && !injectedScript.isEmpty()) {
+            try {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                    WebViewCompat.addDocumentStartJavaScript(
+                            webView,
+                            injectedScript,
+                            Collections.singleton("*")
+                    );
+                    Log.d(TAG, "Document start script added successfully");
+                } else {
+                    Log.w(TAG, "DOCUMENT_START_SCRIPT not supported, falling back to onPageStarted");
+                    // Fallback: inject via onPageStarted
+                    setupPageStartedInjection(webView);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to add document start script: " + e.getMessage());
+                setupPageStartedInjection(webView);
+            }
+        }
+
+        // Set custom WebViewClient to handle Basic Auth
         webView.setWebViewClient(new BridgeWebViewClient(this.getBridge()) {
             @Override
-            public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler, String host, String realm) {
+            public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler,
+                                                   String host, String realm) {
                 SharedPreferences prefs = getSafeSharedPreferences(MainActivity.this);
                 String user = prefs.getString(KEY_AUTH_USER, null);
                 String pass = prefs.getString(KEY_AUTH_PASS, null);
@@ -174,13 +209,6 @@ public class MainActivity extends BridgeActivity {
                 } else {
                     super.onReceivedHttpAuthRequest(view, handler, host, realm);
                 }
-            }
-
-            @Override
-            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                super.onPageStarted(view, url, favicon);
-                // Inject the streaming bridge script before any page JS runs
-                injectBridgeScript(view);
             }
         });
 
@@ -192,7 +220,8 @@ public class MainActivity extends BridgeActivity {
             }
 
             @Override
-            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, WebChromeClient.FileChooserParams fileChooserParams) {
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback,
+                                              WebChromeClient.FileChooserParams fileChooserParams) {
                 if (MainActivity.this.filePathCallback != null) {
                     MainActivity.this.filePathCallback.onReceiveValue(null);
                 }
@@ -206,6 +235,38 @@ public class MainActivity extends BridgeActivity {
                     return false;
                 }
                 return true;
+            }
+        });
+    }
+
+    /**
+     * Fallback injection via onPageStarted when DOCUMENT_START_SCRIPT is not available.
+     */
+    private void setupPageStartedInjection(WebView webView) {
+        webView.setWebViewClient(new BridgeWebViewClient(this.getBridge()) {
+            @Override
+            public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler,
+                                                   String host, String realm) {
+                SharedPreferences prefs = getSafeSharedPreferences(MainActivity.this);
+                String user = prefs.getString(KEY_AUTH_USER, null);
+                String pass = prefs.getString(KEY_AUTH_PASS, null);
+                if (user != null && !user.isEmpty() && pass != null) {
+                    handler.proceed(user, pass);
+                } else {
+                    super.onReceivedHttpAuthRequest(view, handler, host, realm);
+                }
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                try {
+                    if (injectedScript != null && !injectedScript.isEmpty()) {
+                        view.evaluateJavascript(injectedScript, null);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to inject script in onPageStarted: " + e.getMessage());
+                }
             }
         });
     }
@@ -233,19 +294,19 @@ public class MainActivity extends BridgeActivity {
     private String loadInjectedScript() {
         try {
             InputStream is = getAssets().open("public/st-native-bridge.js");
-            byte[] buffer = new byte[is.available()];
-            is.read(buffer);
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = is.read(buffer)) != -1) {
+                baos.write(buffer, 0, bytesRead);
+            }
             is.close();
-            return new String(buffer, "UTF-8");
+            String script = baos.toString("UTF-8");
+            Log.d(TAG, "Loaded injected script: " + script.length() + " bytes");
+            return script;
         } catch (IOException e) {
             Log.e(TAG, "Failed to load st-native-bridge.js: " + e.getMessage());
             return "";
-        }
-    }
-
-    private void injectBridgeScript(WebView view) {
-        if (injectedScript != null && !injectedScript.isEmpty()) {
-            view.evaluateJavascript(injectedScript, null);
         }
     }
 
@@ -335,7 +396,8 @@ public class MainActivity extends BridgeActivity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == FILE_CHOOSER_RESULT_CODE) {
             if (filePathCallback == null) return;
-            filePathCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+            filePathCallback.onReceiveValue(
+                    WebChromeClient.FileChooserParams.parseResult(resultCode, data));
             filePathCallback = null;
         }
     }
