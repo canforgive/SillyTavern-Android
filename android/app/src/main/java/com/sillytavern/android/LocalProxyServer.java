@@ -379,14 +379,15 @@ public class LocalProxyServer {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         byte[] buf = new byte[8192];
 
-        // Read headers first
+        // Read headers first: read chunks and look for \r\n\r\n
         int totalRead = 0;
-        int read;
-        while ((read = in.read(buf, 0, Math.min(buf.length, 1))) != -1) {
+        while (true) {
+            int read = in.read(buf, 0, buf.length);
+            if (read == -1) break;
             baos.write(buf, 0, read);
             totalRead += read;
 
-            // Check for end of headers
+            // Check for end of headers in the accumulated data
             String data = baos.toString("ISO-8859-1");
             int headerEnd = data.indexOf("\r\n\r\n");
             if (headerEnd != -1) {
