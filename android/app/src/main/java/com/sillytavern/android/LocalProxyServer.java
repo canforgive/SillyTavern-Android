@@ -89,14 +89,17 @@ public class LocalProxyServer {
     }
 
     /**
-     * Start the proxy server on a random available port.
+     * Start the proxy server on a fixed port.
      * @return the port number, or 0 if failed
      */
     public int start() {
         if (running.get()) return listenPort;
 
+        int fixedPort = 48765;
         try {
-            serverSocket = new ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"));
+            serverSocket = new ServerSocket();
+            serverSocket.setReuseAddress(true);
+            serverSocket.bind(new java.net.InetSocketAddress("127.0.0.1", fixedPort), 50);
             listenPort = serverSocket.getLocalPort();
             running.set(true);
 

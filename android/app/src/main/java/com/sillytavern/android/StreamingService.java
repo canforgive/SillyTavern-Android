@@ -28,6 +28,8 @@ public class StreamingService extends Service {
     private static final int NOTIFICATION_ID = 2;
     private static final String PREFS_NAME = "SillyTavernPrefs";
     private static final String KEY_BACKGROUND_MODE = "background_mode";
+    private static final String KEY_TARGET_URL = "proxy_target_url";
+    private static final int PROXY_PORT = 48765;
 
     // Actions
     public static final String ACTION_SET_TARGET_URL = "com.sillytavern.android.SET_TARGET_URL";
@@ -141,6 +143,9 @@ public class StreamingService extends Service {
             wifiLock.acquire();
         }
 
+        // Auto-restart proxy if it was configured before service was killed
+        restartProxyIfConfigured();
+
         // Start keepalive pings
         if (keepaliveRunnable != null) {
             mainHandler.removeCallbacks(keepaliveRunnable);
@@ -180,23 +185,47 @@ public class StreamingService extends Service {
 
     private void setTargetAndStartProxy(String targetUrl) {
         Log.d(TAG, "Setting target URL: " + targetUrl);
+
+        // Persist target URL so proxy can restart after service kill
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putString(KEY_TARGET_URL, targetUrl).apply();
+
         proxyServer.setTarget(targetUrl);
         proxyPort = proxyServer.start();
         proxyServer.setForegroundMode(isForeground);
 
         if (proxyPort > 0) {
-            // Notify MainActivity that proxy is ready
-            Intent readyIntent = new Intent(BROADCAST_PROXY_READY);
-            readyIntent.putExtra("proxyPort", proxyPort);
-            readyIntent.putExtra("targetUrl", targetUrl);
-            broadcastManager.sendBroadcast(readyIntent);
-
-            updateNotification("Proxy active on port " + proxyPort);
-            Log.i(TAG, "Proxy ready on port " + proxyPort);
+            notifyProxyReady(targetUrl);
         } else {
             Log.e(TAG, "Failed to start proxy");
             updateNotification("Proxy failed to start");
         }
+    }
+
+    /**
+     * Auto-restart proxy on service recreation (after being killed by system).
+     */
+    private void restartProxyIfConfigured() {
+        String savedUrl = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_TARGET_URL, null);
+        if (savedUrl != null && !savedUrl.isEmpty() && !proxyServer.isRunning()) {
+            Log.d(TAG, "Auto-restarting proxy for " + savedUrl);
+            proxyServer.setTarget(savedUrl);
+            proxyPort = proxyServer.start();
+            proxyServer.setForegroundMode(isForeground);
+            if (proxyPort > 0) {
+                notifyProxyReady(savedUrl);
+            }
+        }
+    }
+
+    private void notifyProxyReady(String targetUrl) {
+        Intent readyIntent = new Intent(BROADCAST_PROXY_READY);
+        readyIntent.putExtra("proxyPort", proxyPort);
+        readyIntent.putExtra("targetUrl", targetUrl);
+        broadcastManager.sendBroadcast(readyIntent);
+        updateNotification("Proxy active on port " + proxyPort);
+        Log.i(TAG, "Proxy ready on port " + proxyPort);
     }
 
     private void setForegroundMode(boolean fg) {

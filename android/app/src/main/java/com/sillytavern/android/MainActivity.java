@@ -146,7 +146,7 @@ public class MainActivity extends BridgeActivity {
         webSettings.setUseWideViewPort(true);
         webSettings.setLoadWithOverviewMode(true);
 
-        // Set custom WebViewClient to handle Basic Auth
+        // Set custom WebViewClient to handle Basic Auth and proxy errors
         webView.setWebViewClient(new BridgeWebViewClient(this.getBridge()) {
             @Override
             public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler,
@@ -159,6 +159,24 @@ public class MainActivity extends BridgeActivity {
                 } else {
                     super.onReceivedHttpAuthRequest(view, handler, host, realm);
                 }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, int errorCode, String description,
+                                         String failingUrl) {
+                // If proxy connection failed, try to restart and reload
+                if (failingUrl != null && failingUrl.contains("127.0.0.1:")) {
+                    Log.w(TAG, "Proxy unreachable: " + description + ". Retrying...");
+                    // Send broadcast to restart proxy
+                    Intent restartIntent = new Intent(StreamingService.ACTION_SET_FOREGROUND);
+                    restartIntent.putExtra("isForeground", true);
+                    LocalBroadcastManager.getInstance(MainActivity.this)
+                            .sendBroadcast(restartIntent);
+                    // Reload after a short delay to let proxy restart
+                    view.postDelayed(() -> view.reload(), 1500);
+                    return;
+                }
+                super.onReceivedError(view, errorCode, description, failingUrl);
             }
         });
 

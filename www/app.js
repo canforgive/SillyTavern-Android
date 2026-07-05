@@ -190,31 +190,21 @@ function connect() {
 }
 
 function connectViaProxy(realUrl) {
+    // Fixed proxy port
+    var proxyPort = 48765;
+    var proxyUrl = 'http://127.0.0.1:' + proxyPort + '/';
+
     // Start the local proxy with the real server URL
     window.BackgroundBridge.startProxy(realUrl);
 
-    // Poll for proxy port (the proxy starts asynchronously)
-    var attempts = 0;
-    var maxAttempts = 20; // 2 seconds max
+    // Give proxy a moment to start, then navigate
+    localStorage.setItem(STORAGE_KEY, proxyUrl);
+    updateDisplay(proxyUrl + ' (via proxy → ' + realUrl + ')');
 
-    function checkProxy() {
-        attempts++;
-        var port = window.BackgroundBridge.getProxyPort();
-        if (port > 0) {
-            var proxyUrl = 'http://127.0.0.1:' + port + '/';
-            localStorage.setItem(STORAGE_KEY, proxyUrl);
-            updateDisplay(proxyUrl + ' (via proxy → ' + realUrl + ')');
-            window.location.href = proxyUrl;
-        } else if (attempts < maxAttempts) {
-            setTimeout(checkProxy, 100);
-        } else {
-            // Timeout: connect directly
-            alert('Proxy failed to start. Connecting directly.');
-            window.location.href = realUrl;
-        }
-    }
-
-    checkProxy();
+    // Short delay to let proxy initialize, then navigate
+    setTimeout(function() {
+        window.location.href = proxyUrl;
+    }, 300);
 }
 
 // Event Listeners
