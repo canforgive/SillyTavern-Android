@@ -43,6 +43,7 @@ public class MainActivity extends BridgeActivity {
 
     private boolean isForeground = true;
     private int proxyPort = 0;
+    private boolean webViewInitialized = false;
 
     // Receiver for proxy/streaming events from StreamingService
     private BroadcastReceiver serviceReceiver = new BroadcastReceiver() {
@@ -120,11 +121,13 @@ public class MainActivity extends BridgeActivity {
             return;
         }
 
-        // Add JavaScript Interfaces
-        webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
-        webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
+        // One-time WebView initialization (only on first resume)
+        if (!webViewInitialized) {
+            webViewInitialized = true;
+            initWebView(webView);
+        }
 
-        // Register broadcast receiver for service events
+        // Re-register broadcast receiver (may have been unregistered in onPause)
         LocalBroadcastManager lbm = LocalBroadcastManager.getInstance(this);
         IntentFilter filter = new IntentFilter();
         filter.addAction(StreamingService.BROADCAST_KEEPALIVE_PING);
@@ -137,6 +140,14 @@ public class MainActivity extends BridgeActivity {
 
         // Sync background service state
         syncBackgroundService();
+    }
+
+    private void initWebView(WebView webView) {
+        Log.d(TAG, "Initializing WebView (one-time)");
+
+        // Add JavaScript Interfaces
+        webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
+        webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
 
         // Enable Zoom Support
         WebSettings webSettings = webView.getSettings();
